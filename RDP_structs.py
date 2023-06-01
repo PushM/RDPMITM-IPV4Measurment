@@ -350,7 +350,7 @@ mcs_response = Header("Server MCS Connect Response", [
     t125_cr
 ])
 
-def build_x224_conn_req(cookieval=b"Cookie: mstshash=lion", flags=0xff, protocols=PROTOCOL_SSL):
+def build_x224_conn_req(cookieval=b"Cookie: mstshash=kabi", flags=0xff, protocols=PROTOCOL_SSL):
     tpkt_len = 21 + len(cookieval)
     x224_len = 16 + len(cookieval)
     return x224_conn_req.pack([[3, 0, tpkt_len], [x224_len, 0xe0, 0, 0, 0], cookieval, [1, flags, 8, protocols]])
@@ -406,3 +406,5 @@ def build_mcs_initial(
 
     tpkt_len = 7 + len(t125_ci.pack(t125_ci_data))
     return mcs_initial.pack([[0x3, 0, tpkt_len], [2, 0xf0, 0x80], t125_ci_data])
+
+#print(build_mcs_initial())

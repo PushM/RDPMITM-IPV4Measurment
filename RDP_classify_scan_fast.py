@@ -2,7 +2,7 @@ from multiprocessing import Pool
 import csv
 import json
 import binascii
-import argparse
+import argparse 
 import time
 import os
 
@@ -138,7 +138,7 @@ class Processor():
                             if not raw_data[data_offset:]:
                                 resps.append({"exception": conn_exc, "data": ""})
                                 break
-                            # weird xrdp data
+                            # weird xrdp data xrdp时linux中rdp server实现，tpktHeader 
                             if raw_data[data_offset:].startswith(b"\x03\x00\x00\x09"):
                                 unp_data, l = xrdp_err.unpack(raw_data[data_offset:])
                                 resps.append({"exception": -1, "data": unp_data})
@@ -158,19 +158,19 @@ class Processor():
                         if not raw_data[data_offset:]:
                             resps.append({"exception": conn_exc, "data": ""})
                         else:
-                            if not raw_data.startswith(b"\x03"):
+                            if not raw_data.startswith(b"\x03"):#不是03开头，不是rdp协议
                                 raise BadRDPException()
-                            unp_data, l = formats[0].unpack(raw_data)
-                            tls_data = raw_data[l:]
+                            unp_data, l = formats[0].unpack(raw_data)#formats[0]是x224
+                            tls_data = raw_data[l:]#x224之后是tls协议
                             if tls_data:
                                 try:
-                                    tls_class = tls_classify(tls_unpack(tls_data))
+                                    tls_class = tls_classify(tls_unpack(tls_data))#这里做了tls实现的分类
                                 except:
                                     tls_class = "HANDSHAKE"
                                 self.data[ip]["tls_classes"].append(tls_class)
                             resps.append({"exception": -1, "data": unp_data})
 
-                            for fmt in formats[1:]:
+                            for fmt in formats[1:]:#分析tls协商后的加密信息，就是MCS部分或者cred了
                                 if not enc_data[data_offset:]:
                                     resps.append({"exception": conn_exc, "data": ""})
                                     break
@@ -181,7 +181,7 @@ class Processor():
                                     break
                                 # credssp data
                                 if not enc_data.startswith(b"\x03"):
-                                    unp_data, l = formats_credssp[1].unpack(enc_data[data_offset:])
+                                    unp_data, l = formats_credssp[1].unpack(enc_data[data_offset:])#formats_credssp[1]处理cred没有实现
                                     resps.append({"exception": -1, "data": unp_data})
                                     break
                                 

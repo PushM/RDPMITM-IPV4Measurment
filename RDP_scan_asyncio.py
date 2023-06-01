@@ -12,6 +12,7 @@ import binascii
 import argparse
 import ipaddress
 import csv
+import time
 
 import ssl
 import enum
@@ -21,10 +22,12 @@ from RDP_structs import *
 from RDP_consts import *
 
 PACKET_NEGO = build_x224_conn_req()
-PACKET_NEGO_CRED_SSP = build_x224_conn_req(protocols=PROTOCOL_SSL|PROTOCOL_HYBRID)
+PACKET_NEGO_CRED_SSP = build_x224_conn_req(protocols=PROTOCOL_HYBRID)
 PACKET_NEGO_NOSSL = build_x224_conn_req(protocols=0) # Standard RDP security
+PACKET_NEGO_DOWNGRADETEST =  build_x224_conn_req(protocols=PROTOCOL_DOWNGRADE)
 PACKET_CONN = build_mcs_initial()
 PACKET_CONN_RDPSEC = bytes.fromhex("0300019b02f0807f6582018f0401010401010101ff301a020122020102020100020101020100020101020300ffff0201023019020101020101020101020101020100020101020204200201023020020300ffff020300fc17020300ffff020101020100020101020300ffff02010204820129000500147c00018120000800100001c00044756361811201c0ea000c0008002003580201ca03aa00000000bb470000660066002d0075006e006900000000000000000000000000000000000000000004000000000000000c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001ca0100000000001000070021040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000004c00c000d0000000000000002c00c00130000000000000006c00800000000000ac0080000000000")
+PACKET_CONN_CRED_SSP = bytes.fromhex("3037a003020106a130302e302ca02a04284e544c4d5353500001000000b78208e2000000000000000000000000000000000a00614a0000000f")
 
 class PeriodicBoundedSemaphore(asyncio.BoundedSemaphore):
     def __init__(self, conn_per_sec, loop):
@@ -47,11 +50,15 @@ class SSLProtocol(asyncio.Protocol):
         self.loop = loop
         self.inbuf_raw = b""
         self.inbuf_ssl = b""
+        self.tcpconnnect_endtime = None
+        self.x224_rttTime = None
+        self.mcsntlm_rttTime = None
 
     def _timeout(self):
         self.inner.timeout()
     
     def connection_made(self, transport):
+        self.tcpconnnect_endtime = time.time()
         self.transport = transport
         self.timeout_handle = self.loop.call_later(self.timeout_time, self._timeout)
 
@@ -62,9 +69,10 @@ class SSLProtocol(asyncio.Protocol):
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.VerifyMode.CERT_NONE
+        # ssl
         self.ssl = ssl_ctx.wrap_bio(self.ssl_in, self.ssl_out)
 
-        self.inner.connection_made(self)
+        self.inner.connection_made(self)#外层协议传给内层协议，RDPProtocol的transport就是SSLProtocol
 
     def start_tls(self):
         if self.ssl_enabled:
@@ -74,7 +82,7 @@ class SSLProtocol(asyncio.Protocol):
     
     def try_ssl_handshake(self):
         try:
-            self.ssl.do_handshake()
+            self.ssl.do_handshake() #握手
             self.ssl_handshake_done = True
             self.inner.tls_started()
         except ssl.SSLWantReadError:
@@ -91,9 +99,15 @@ class SSLProtocol(asyncio.Protocol):
             except ssl.SSLWantReadError:
                 pass
         else:
+            
             self.transport.write(data)
 
     def data_received(self, data):
+        if self.inner.state == 0:
+            self.x224_rttTime = time.time() - self.inner.x224_startTime
+        else :
+            self.mcsntlm_rttTime = time.time() - self.inner.mcsntlm_startTime
+
         self.timeout_handle.cancel()
         self.timeout_handle = self.loop.call_later(self.timeout_time, self._timeout) # restart the timeout
 
@@ -103,7 +117,7 @@ class SSLProtocol(asyncio.Protocol):
             if self.ssl_handshake_done:
                 try:
                     dec = self.ssl.read()
-                    self.inbuf_ssl += dec
+                    self.inbuf_ssl += dec  #这是解密后的吧
                     self.inner.data_received(dec)
                 except ssl.SSLWantReadError:
                     pass
@@ -136,6 +150,8 @@ class RDPConnection(asyncio.Protocol):
         self.conntype = conntype
         self.buffer = b""
         self.transport = None
+        self.x224_startTime = None
+        self.mcsntlm_startTime = None
     
     def timeout(self):
         self.is_timeout = True
@@ -144,15 +160,25 @@ class RDPConnection(asyncio.Protocol):
 
     def connection_made(self, transport):
         self.transport = transport
+
+        self.x224_startTime = time.time()
+
         if self.conntype == PROTOCOL_HYBRID:
             transport.write(PACKET_NEGO_CRED_SSP)
         elif self.conntype == PROTOCOL_RDP:
             transport.write(PACKET_NEGO_NOSSL)
-        else:
+        elif self.conntype == PROTOCOL_SSL:
             transport.write(PACKET_NEGO)
+        else :
+            transport.write(PACKET_NEGO_DOWNGRADETEST)
 
     def tls_started(self):
-        self.transport.write(PACKET_CONN)
+
+        self.mcsntlm_startTime = time.time()
+        if self.conntype == PROTOCOL_SSL :
+            self.transport.write(PACKET_CONN)
+        elif self.conntype == PROTOCOL_HYBRID :
+            self.transport.write(PACKET_CONN_CRED_SSP)
         self.data["tls_cipher"] = self.transport.ssl.cipher()
         self.data["tls_certificate"] = self.transport.ssl.getpeercert(binary_form=True).hex()
 
@@ -162,12 +188,17 @@ class RDPConnection(asyncio.Protocol):
             data_len = struct.unpack(">H", self.buffer[2:4])[0] # check header for length and compare with received length
             if len(self.buffer) >= data_len:
                 self.buffer = self.buffer[data_len:] # TPKT done, receive next
-                if self.state == 0:
+                if self.state == 0: # self.state = 0表示处于x224协商 self.state = 1 是tls建立后的第一次
                     self.state += 1
-                    if self.conntype != PROTOCOL_RDP:
+                    if self.conntype == PROTOCOL_HYBRID or self.conntype == PROTOCOL_SSL:#credssp和ssl都发mcsinit
                         self.transport.start_tls()
-                    else:
+                    elif self.conntype == PROTOCOL_RDP:
+                        self.mcsntlm_startTime = time.time()#rdpsec的rtt也记录一下吧
                         self.transport.write(PACKET_CONN_RDPSEC)
+                    else : # PROTOCOL_downgradtest
+                        self.transport.close()
+
+                
                 else:
                     self.transport.close()
 
@@ -203,7 +234,9 @@ async def handle_connection(loop, ip, timeout, sem, response_log, rdp_protocol):
     on_tls = loop.create_future()
     await sem.acquire()
     try:
+        tcpconnect_starttime = time.time()
         transport, protocol = await asyncio.wait_for(loop.create_connection(lambda: SSLProtocol(RDPConnection(con_close, loop, ip, rdp_protocol), loop, timeout), ip, args.port), timeout=timeout)
+        #loop.create_connection()：通常接受protocol_factory参数，该参数用于为接受的连接创建Protocol对象，由Transport对象表示。 这些方法通常返回(传输，协议)元组。
     except asyncio.exceptions.TimeoutError:
         print(f"{ip} {rdp_protocol}: Connect timed out")
         return
@@ -214,18 +247,31 @@ async def handle_connection(loop, ip, timeout, sem, response_log, rdp_protocol):
         print(f"{ip} {rdp_protocol}: {e}")
         return
     await con_close
-    fields = [
-        protocol.inner.ip,
-        protocol.inbuf_raw.hex(),
-        protocol.inbuf_ssl.hex(),
-        f"{rdp_protocol}",
-        json.dumps(protocol.inner.data)
-    ]
+
+    connection_rttTime = tcpconnect_starttime - protocol.tcpconnnect_endtime
+    fields = []
+    if rdp_protocol == PROTOCOL_DOWNGRADE:
+        fields = [
+            protocol.inner.ip,
+            f"{rdp_protocol}",
+            json.dumps({"connect":connection_rttTime, 'x224':protocol.x224_rttTime }),
+            protocol.inbuf_raw.hex(),#未加密和加密后的消息,服务端选择1还是2        
+        ]
+    else:
+        fields = [
+            protocol.inner.ip,
+            f"{rdp_protocol}",
+            json.dumps({"connect":connection_rttTime, 'x224':protocol.x224_rttTime , 'mcsntlm':protocol.mcsntlm_ettTime}),
+            protocol.inbuf_raw.hex(),#未加密和加密后的消息
+            protocol.inbuf_ssl.hex(),#ssl加密后的消息，应该只有mode=1时才会有，mode=2时加入了ntlm，应该ssl建立不了就报错了？
+            json.dumps(protocol.inner.data)#包含cipher、certification、exception
+        ]#之后就是分析模块
     response_log.writerow(fields)
     return
 
 async def main(args):
     loop = asyncio.get_running_loop()
+    #loop.create_connection
     sem = PeriodicBoundedSemaphore(args.max_cps, loop)
     stdin_closed = False
 
@@ -237,16 +283,16 @@ async def main(args):
         while True:
             if finished % args.progress == 0:
                 sys.stderr.write("Finished: {}\r".format(finished))
-            
+            #一次create max_connections 个connection后再执行
             while len(connections) < args.max_connections: # create as many concurrent connections as possible
-                ready = select.select([sys.stdin], [], [], 0.0)[0]
+                ready = select.select([sys.stdin], [], [], 0.0)[0]#zmap 给程序输入
                 if not ready: # no input available on stdin
                     if not connections: # nothing to do, only waiting for input
                         ready = select.select([sys.stdin], [], [])[0]
                     else: # no input in time
                         break
 
-                ip = ready[0].readline().strip()
+                ip = ready[0].readline().strip()#zmap扫描到的开启3389端口的主机
                 if not ip: # stdin is closed
                     if not connections:
                         return # stdin is closed, no connections remaining, we are done
@@ -256,14 +302,19 @@ async def main(args):
                 try:
                     check = ipaddress.ip_address(ip)
                     if check.is_global or not args.global_check: # add a check for any subnet here
+                        connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE))) # RPD Standard Security without TLS
+                        connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_RDP))) # RPD Standard Security without TLS                        
                         connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_SSL))) # Standard packet
                         connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_HYBRID))) # CredSSP enabled
-                        connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_RDP))) # RPD Standard Security without TLS
+                        
                 except ValueError:
                     pass
 
+                    #如果设置了timeout值，则意味着此处最多等待的秒，完成的协程返回值写入到done中，未完成则写到pending中。done, pending = await asyncio.wait(task_list, timeout=None)
 
             _, connections = await asyncio.wait(connections, return_when=asyncio.FIRST_COMPLETED) # wait for first connection to finish
+            # return_when=asyncio.FIRST_COMPLETED 当第一个结果返回“幕后”时，应该终止所有剩余的任务
+            #第一个连接搞完就继续了？是因为更好地并行？因为zmap给下一个max_connections个ip还有一定时间，这段时间足够处理完这些connections了？
             finished += 1
 
 if __name__ == "__main__":
