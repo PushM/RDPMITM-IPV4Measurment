@@ -6,6 +6,6 @@
 
 Our scanners are supposed to be used with the ZMap internet scanner. Therefore, to perform a scan  you can e.g. perform the follwoing command:
 
-    zmap -p 3359 | python3 RDP_scan_asyncio.py
+    zmap -p 3389 | python3 RDP_scan_asyncio.py
 
 
