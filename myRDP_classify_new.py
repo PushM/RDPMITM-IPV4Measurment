@@ -13,9 +13,8 @@ from TLS_structs import tls_unpack
 from TLS_classify import tls_classify, TLS_RESPONSES
 
 p = argparse.ArgumentParser()
-# p.add_argument("--response_log", type=str, default="D:\\大论文写作\\test.csv")
 
-p.add_argument("--response_log", type=str, default="D:\\rdpData\\test20250213.csv")
+p.add_argument("--response_log", type=str, default="test20250213.csv") # 测量结果
 
 p.add_argument("--num-workers", type=int, default=12)
 p.add_argument("--head", type=int, default=None)
