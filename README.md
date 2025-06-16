@@ -2,7 +2,7 @@
 
 ## 1、开始扫描
 ```
-zmap -p 3359 | python3 RDP_scan_asyncio.py
+zmap -p 3389 | python3 RDP_scan_asyncio.py
 ```
 
 ## 2、扫描数据处理
