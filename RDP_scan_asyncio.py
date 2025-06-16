@@ -173,9 +173,6 @@ class RDPConnection(asyncio.Protocol):
             transport.write(PACKET_NEGO_DOWNGRADETEST)
 
     def tls_started(self):
-
-        self.mcsntlm_startTime = time.time()
-
         if self.conntype == PROTOCOL_SSL :
             self.transport.write(PACKET_CONN)
         elif self.conntype == PROTOCOL_HYBRID :
@@ -183,6 +180,9 @@ class RDPConnection(asyncio.Protocol):
             
         self.data["tls_cipher"] = self.transport.ssl.cipher()
         self.data["tls_certificate"] = self.transport.ssl.getpeercert(binary_form=True).hex()
+
+        self.mcsntlm_startTime = time.time()
+
 
     def data_received(self, data):
         self.buffer += data
@@ -258,7 +258,9 @@ async def handle_connection(loop, ip, timeout, sem, response_log, rdp_protocol):
             protocol.inner.ip,
             f"{rdp_protocol}",
             json.dumps({"connection":connection_rttTime,"x224":protocol.x224_rttTime}),
-            #protocol.inbuf_raw.hex(),#未加密和加密后的消息,服务端选择1还是2
+            protocol.inbuf_raw.hex(),#未加密和加密后的消息,服务端选择1还是2
+            protocol.inbuf_ssl.hex(),#ssl加密后的消息，应该只有mode=1时才会有，mode=2时加入了ntlm，应该ssl建立不了就报错了？
+            json.dumps(protocol.inner.data)#包含cipher、certification、exception
         ]
     else:
         fields = [
@@ -281,6 +283,7 @@ async def main(args):
     ips_buffered = []
     connections = set()
     finished = 0
+    total_ips_read = 0
     with open(os.path.join(results_dir, "test.csv"), "a") as response_log_f:
         response_log = csv.writer(response_log_f)
         while True:
@@ -288,20 +291,24 @@ async def main(args):
                 sys.stderr.write("Finished: {}\r".format(finished))
             #一次create max_connections 个connection后再执行
             while len(connections) < args.max_connections: # create as many concurrent connections as possible
-                ready = select.select([sys.stdin], [], [], 0.0)[0]#zmap 给程序输入
-                if not ready: # no input available on stdin
-                    if not connections: # nothing to do, only waiting for input
+                ready = select.select([sys.stdin], [], [], 0.0)[0] #zmap 给程序输入,使用 select.select 检查 stdin 是否有数据可读：
+                if not ready: # no input available on stdin 如果没有数据可读：
+                    if not connections: # nothing to do, only waiting for input 如果没有正在处理的连接，则阻塞等待输入
                         ready = select.select([sys.stdin], [], [])[0]
-                    else: # no input in time
+                    else: # no input in time 如果有正在处理的连接，则跳过读取，继续处理现有连接。
                         break
+
 
                 ip = ready[0].readline().strip()#zmap扫描到的开启3389端口的主机
                 # ip = '18.143.159.103'
-                if not ip: # stdin is closed
-                    if not connections:
-                        return # stdin is closed, no connections remaining, we are done
+                if not ip: # stdin is closed 当 stdin 关闭（读取到空行）时
+                    if not connections: 
+                        # 在程序结束时打印从 stdin 读取的 IP 总数
+                        print(f"Total IPs read from stdin: {total_ips_read}")
+                        return # stdin is closed, no connections remaining, we are done 如果没有正在处理的连接，则退出程序：
                     else:
-                        break # stdin is closed, wait for remaining connections
+                        break # stdin is closed, wait for remaining connections 果有正在处理的连接，则等待这些连接完成后再退出。
+                total_ips_read += 1
 
                 try:
                     check = ipaddress.ip_address(ip)
@@ -311,24 +318,27 @@ async def main(args):
                        
                         connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_SSL))) # Standard packet
                         connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_HYBRID))) # CredSSP enabled
+                        connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_HYBRID))) # CredSSP enabled
+
                         connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
                         connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
-                        connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
-                        connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
-                        connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
-                        connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
-                        connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
-                        connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
+                        # connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
+                        # connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
+                        # connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
+                        # connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
+                        # connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
+                        # connections.add(asyncio.create_task(handle_connection(loop, ip, args.timeout, sem, response_log, PROTOCOL_DOWNGRADE)))
                         
                 except ValueError:
                     pass
 
                     #如果设置了timeout值，则意味着此处最多等待的秒，完成的协程返回值写入到done中，未完成则写到pending中。done, pending = await asyncio.wait(task_list, timeout=None)
-
+                print('current connections num:',len(connections))
             _, connections = await asyncio.wait(connections, return_when=asyncio.FIRST_COMPLETED) # wait for first connection to finish
             # return_when=asyncio.FIRST_COMPLETED 当第一个结果返回“幕后”时，应该终止所有剩余的任务
             #第一个连接搞完就继续了？是因为更好地并行？因为zmap给下一个max_connections个ip还有一定时间，这段时间足够处理完这些connections了？
             finished += 1
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

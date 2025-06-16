@@ -110,9 +110,12 @@ def tls_unpack(data):
     first_record = dict(res[0][1])
     tls_version = first_record["Version"]
 
+    print(res)
+
     max_hmsg_per_record = 0
     curve_name = None
     cipher = None
+    has_cert = False
     for r in res:
         fields = dict(r[1])
         if fields["ContentType"] == TLSContentType.HANDSHAKE.value:
@@ -124,11 +127,15 @@ def tls_unpack(data):
                     cipher = shello_fields["CipherSuite"]
                     if cipher & 0xff00 == 0x1300:
                         tls_version = ProtocolVersion.TLS_1_3
+                # 如果存在证书，可以继续逻辑处理；如果不存在证书。证明这个tls实现特征不可用。。。。。
+                if m[1][2][0] == "Certificate":
+                    has_cert = True
+
                 if m[1][2][0] == "Server Key Exchange":
                     skex_fields = dict(m[1][2][1])
                     if skex_fields["Curve Type"] == ECCCurveType.NAMED_CURVE.value:
                         curve_name = skex_fields["Curve"]
             max_hmsg_per_record = max(max_hmsg_per_record, messages_per_record)
 
-    return ("TLS Data", [("Version", str(tls_version)), ("Cipher", cipher), ("Multiple Handshake Msg", max_hmsg_per_record > 1), ("KEX Curve", curve_name)])
+    return ("TLS Data", [("Version", str(tls_version)), ("Cipher", cipher), ("Multiple Handshake Msg", (max_hmsg_per_record, has_cert)), ("KEX Curve", curve_name)])
     # return ("TLS Data", [("Version", str(tls_version)), ("Cipher", cipher), ("Multiple Handshake Msg", max_hmsg_per_record), ("KEX Curve", curve_name)])

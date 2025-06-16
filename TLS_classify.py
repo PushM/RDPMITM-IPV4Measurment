@@ -10,7 +10,11 @@ TLS_RESPONSES = {
 }
 
 def tls_classify(data):
-    if data[1][2][1] :
-        return ["Windows" , 1]
+    has_cert = data[1][2][1][1]
+    if not has_cert:
+        return ["not_has_cert" , 2]
     else:
-        return ["OpenSSL" , 0]
+        if data[1][2][1][0] > 1 :
+            return ["Windows" , 1]
+        else:
+            return ["OpenSSL" , 0]
